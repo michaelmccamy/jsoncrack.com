@@ -38,8 +38,8 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
   const [isEditing, setIsEditing] = React.useState(false);
   const [editValue, setEditValue] = React.useState("");
   const [isObjectValue, setIsObjectValue] = React.useState(false);
-  const [nameField, setNameField] = React.useState("");
-  const [colorField, setColorField] = React.useState("");
+  // map of primitive fields (key -> string value) for object nodes
+  const [objectFields, setObjectFields] = React.useState<Record<string, string>>({});
 
   React.useEffect(() => {
     // initialize editValue when node changes
@@ -66,20 +66,31 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
         // If the node value is an object (not an array), present structured editing
         if (typeof cur === "object" && cur !== null && !Array.isArray(cur)) {
           setIsObjectValue(true);
-          setNameField(cur.name ?? "");
-          setColorField(cur.color ?? "");
+          // collect only primitive fields (string/number/boolean/null) to allow editing
+          const fields: Record<string, string> = {};
+          Object.keys(cur).forEach(k => {
+            const val = cur[k];
+            if (val === null || ["string", "number", "boolean"].includes(typeof val)) {
+              // stringify primitive values for editing
+              fields[k] = typeof val === "string" ? val : String(val ?? "");
+            }
+          });
+          setObjectFields(fields);
           setEditValue(JSON.stringify(cur, null, 2));
         } else {
           setIsObjectValue(false);
+          setObjectFields({});
           setEditValue(typeof cur === "object" ? JSON.stringify(cur, null, 2) : String(cur ?? ""));
         }
       } catch (e) {
         // fallback to derived representation
         setIsObjectValue(false);
+        setObjectFields({});
         setEditValue(normalizeNodeData(nodeData.text ?? []));
       }
     } else {
       setEditValue(normalizeNodeData(nodeData.text ?? []));
+      setObjectFields({});
     }
 
     setIsEditing(false);
@@ -96,10 +107,37 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
   };
 
   const handleSave = () => {
-    if (!nodeData || !nodeData.path) return;
+    if (!nodeData) return;
     try {
       const obj = JSON.parse(json);
-      const path = nodeData.path as Array<string | number>;
+      const path = nodeData.path as Array<string | number> | undefined;
+
+      // if path is missing or empty -> root
+      if (!path || path.length === 0) {
+        if (isObjectValue) {
+          Object.keys(objectFields).forEach(k => {
+            try {
+              (obj as any)[k] = parseEditedValue(objectFields[k]);
+            } catch (e) {
+              (obj as any)[k] = objectFields[k];
+            }
+          });
+        } else {
+          const newRoot = parseEditedValue(editValue);
+          // overwrite whole root
+          const newJsonRoot = JSON.stringify(newRoot, null, 2);
+          setJson(newJsonRoot);
+          try { setContents({ contents: newJsonRoot, hasChanges: false, skipUpdate: true }); } catch (e) {}
+          setIsEditing(false);
+          return;
+        }
+        // proceed to write updated obj as root
+        const newJsonRoot = JSON.stringify(obj, null, 2);
+        setJson(newJsonRoot);
+        try { setContents({ contents: newJsonRoot, hasChanges: false, skipUpdate: true }); } catch (e) {}
+        setIsEditing(false);
+        return;
+      }
 
       // traverse to parent
       let cur: any = obj;
@@ -111,14 +149,24 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
       const lastSeg = path[path.length - 1];
 
       if (isObjectValue) {
-        // Update only name and color fields on the object to preserve other nested data
+        // Update only primitive fields collected in objectFields to preserve nested collections
         const target = cur[lastSeg as any];
         if (typeof target === "object" && target !== null) {
-          target.name = nameField;
-          target.color = colorField;
+          Object.keys(objectFields).forEach(k => {
+            try {
+              target[k] = parseEditedValue(objectFields[k]);
+            } catch (e) {
+              // fallback to string
+              target[k] = objectFields[k];
+            }
+          });
         } else {
-          // if target isn't an object, replace with a minimal object
-          cur[lastSeg as any] = { ...(typeof target === "object" ? target : {}), name: nameField, color: colorField } as any;
+          // if target isn't an object, create a new object with the primitive fields
+          const newObj: any = {};
+          Object.keys(objectFields).forEach(k => {
+            newObj[k] = parseEditedValue(objectFields[k]);
+          });
+          cur[lastSeg as any] = newObj;
         }
       } else {
         const newVal = parseEditedValue(editValue);
@@ -156,11 +204,18 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
 
         if (typeof cur === "object" && cur !== null && !Array.isArray(cur)) {
           setIsObjectValue(true);
-          setNameField(cur.name ?? "");
-          setColorField(cur.color ?? "");
+          const fields: Record<string, string> = {};
+          Object.keys(cur).forEach(k => {
+            const val = cur[k];
+            if (val === null || ["string", "number", "boolean"].includes(typeof val)) {
+              fields[k] = typeof val === "string" ? val : String(val ?? "");
+            }
+          });
+          setObjectFields(fields);
           setEditValue(JSON.stringify(cur, null, 2));
         } else {
           setIsObjectValue(false);
+          setObjectFields({});
           setEditValue(typeof cur === "object" ? JSON.stringify(cur, null, 2) : String(cur ?? ""));
         }
       } catch (e) {
@@ -216,8 +271,18 @@ export const NodeModal = ({ opened, onClose }: ModalProps) => {
               />
             ) : isObjectValue ? (
               <Stack gap="xs">
-                <TextInput label="name" value={nameField} onChange={e => setNameField(e.currentTarget.value)} />
-                <TextInput label="color" value={colorField} onChange={e => setColorField(e.currentTarget.value)} />
+                {Object.keys(objectFields).length > 0 ? (
+                  Object.entries(objectFields).map(([k, v]) => (
+                    <TextInput
+                      key={k}
+                      label={k}
+                      value={v}
+                      onChange={e => setObjectFields(prev => ({ ...prev, [k]: e.currentTarget.value }))}
+                    />
+                  ))
+                ) : (
+                  <Text fz="sm" color="dim">No editable primitive fields on this object (nested collections are edited via their own nodes)</Text>
+                )}
               </Stack>
             ) : (
               <Textarea
